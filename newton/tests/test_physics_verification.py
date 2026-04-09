@@ -1402,6 +1402,10 @@ for device in devices:
             lambda model: newton.solvers.SolverSemiImplicit(model, angular_damping=0.0),
             False,
         ),
+        "kamino": (
+            newton.solvers.SolverKamino,
+            False,
+        ),
     }
     for solver_name, (solver_fn, uses_gen_coords) in solvers.items():
         if device.is_cuda and solver_name == "mujoco_cpu":
@@ -1457,6 +1461,10 @@ for device in devices:
         ),
         "xpbd": (
             lambda model: newton.solvers.SolverXPBD(model, iterations=20, angular_damping=0.0),
+            False,
+        ),
+        "kamino": (
+            newton.solvers.SolverKamino,
             False,
         ),
     }
