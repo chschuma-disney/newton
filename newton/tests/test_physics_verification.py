@@ -1464,7 +1464,17 @@ for device in devices:
             False,
         ),
         "kamino": (
-            newton.solvers.SolverKamino,
+            lambda model: newton.solvers.SolverKamino(
+                model,
+                config=newton.solvers.SolverKamino.Config(
+                    constraints=newton._src.solvers.kamino.config.ConstraintStabilizationConfig(alpha=0.0),
+                    padmm=newton._src.solvers.kamino.config.PADMMSolverConfig(
+                        primal_tolerance=1e-7,
+                        dual_tolerance=1e-7,
+                        compl_tolerance=1e-7,
+                    ),
+                ),
+            ),
             False,
         ),
     }
