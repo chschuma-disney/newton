@@ -297,18 +297,15 @@ class TestModelConversions(unittest.TestCase):
         asset_path = newton.utils.download_asset("disneyresearch")
         asset_file = str(asset_path / "dr_testmech" / "usd" / "dr_testmech.usda")
 
-        # Create a fourbar using Newton's ModelBuilder and
+        # Load the test mechanism using Newton's ModelBuilder and
         # register Kamino-specific custom attributes
         builder_0: ModelBuilder = ModelBuilder()
         SolverKamino.register_custom_attributes(builder_0)
         builder_0.default_shape_cfg.margin = 0.0
         builder_0.default_shape_cfg.gap = 0.0
-
-        # Create a fourbar using Newton's ModelBuilder
         builder_0.begin_world()
         builder_0.add_usd(
             source=asset_file,
-            joint_ordering=None,
             force_show_colliders=True,
         )
         builder_0.end_world()
@@ -316,19 +313,19 @@ class TestModelConversions(unittest.TestCase):
         # Overwriting mu = 0.7 to match Kamino's default material properties
         builder_0.shape_material_mu = [0.7] * len(builder_0.shape_material_mu)
 
-        # Import the same fourbar using Kamino's USDImporter and ModelBuilderKamino
+        # Import the same model using Kamino's USDImporter and ModelBuilderKamino
         importer = USDImporter()
         builder_1: ModelBuilderKamino = importer.import_from(
             source=asset_file,
             load_static_geometry=True,
-            retain_joint_ordering=False,
+            retain_joint_ordering=True,
             meshes_are_collidable=True,
             force_show_colliders=True,
             use_prim_path_names=True,
         )
 
         # Create models from the builders and conversion operations, and check for consistency
-        model_0: Model = builder_0.finalize(skip_validation_joints=True)
+        model_0: Model = builder_0.finalize()
         model_1: ModelKamino = builder_1.finalize()
         model_2: ModelKamino = ModelKamino.from_newton(model_0)
         # NOTE: We don't check:
@@ -359,7 +356,6 @@ class TestModelConversions(unittest.TestCase):
         builder_0.begin_world()
         builder_0.add_usd(
             source=asset_file,
-            joint_ordering=None,
             force_show_colliders=True,
             force_position_velocity_actuation=True,
         )
@@ -379,7 +375,7 @@ class TestModelConversions(unittest.TestCase):
         )
 
         # Create models from the builders and conversion operations, and check for consistency
-        model_0: Model = builder_0.finalize(skip_validation_joints=True)
+        model_0: Model = builder_0.finalize()
         model_1: ModelKamino = builder_1.finalize()
         model_2: ModelKamino = ModelKamino.from_newton(model_0)
         # NOTE: We don't check:
