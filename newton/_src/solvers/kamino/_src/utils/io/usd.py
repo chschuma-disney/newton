@@ -1971,6 +1971,8 @@ class USDImporter:
 
         # Define a list to hold all joint descriptors to be added to the builder after sorting
         joint_descriptors: list[JointDescriptor] = []
+        articulation_joint_descriptors: list[JointDescriptor] = []
+        excluded_joint_descriptors: list[JointDescriptor] = []
         articulation_root_joints: list[JointDescriptor] = []
 
         # If retaining joint ordering, first construct lists of joint prim paths and their
@@ -2011,6 +2013,10 @@ class USDImporter:
                         if joint_desc is not None:
                             msg.debug(f"Adding joint '{builder.num_joints}':\n{joint_desc}\n")
                             joint_descriptors.append(joint_desc)
+                            if joint_spec.excludeFromArticulation:
+                                excluded_joint_descriptors.append(joint_desc)
+                            else:
+                                articulation_joint_descriptors.append(joint_desc)
                             # Check if the joint's Follower body is the articulation root
                             if body_path_map[joint_desc.bid_F] in articulation_root_body_paths:
                                 articulation_root_joints.append(joint_desc)
@@ -2050,6 +2056,10 @@ class USDImporter:
                 if joint_desc is not None:
                     msg.debug(f"Adding joint '{builder.num_joints}':\n{joint_desc}\n")
                     joint_descriptors.append(joint_desc)
+                    if joint_spec.excludeFromArticulation:
+                        excluded_joint_descriptors.append(joint_desc)
+                    else:
+                        articulation_joint_descriptors.append(joint_desc)
                     # Check if the joint's Follower body is the articulation root
                     if body_path_map[joint_desc.bid_F] in articulation_root_body_paths:
                         articulation_root_joints.append(joint_desc)
@@ -2094,22 +2104,24 @@ class USDImporter:
                     f"root body '{root_body_path}' to the world:\n{joint_desc}\n"
                 )
                 joint_descriptors.insert(0, joint_desc)
+                articulation_joint_descriptors.insert(0, joint_desc)
 
         # If an articulation is present, sort joint indices according
         # to DFS to produce a minimum-depth kinematic tree ordering
         if len(articulation_root_body_paths) > 0 and len(joint_descriptors) > 0:
             # Create a list of body-pair indices (B, F) for each joint
-            joint_body_pairs = [(joint_desc.bid_B, joint_desc.bid_F) for joint_desc in joint_descriptors]
+            joint_body_pairs = [(joint_desc.bid_B, joint_desc.bid_F) for joint_desc in articulation_joint_descriptors]
             # Perform a topological sort of the joints based on their body-pair indices
             joint_indices, reversed_joints = topological_sort_undirected(joints=joint_body_pairs, use_dfs=True)
             # Reverse the order of the joints that were reversed during the topological
             # sort to maintain the original joint directionality as much as possible
             for i in reversed_joints:
-                joint_desc = joint_descriptors[i]
+                joint_desc = articulation_joint_descriptors[i]
                 joint_desc.bid_B, joint_desc.bid_F = joint_desc.bid_F, joint_desc.bid_B
                 joint_desc.B_r_Bj, joint_desc.F_r_Fj = joint_desc.F_r_Fj, joint_desc.B_r_Bj
             # Reorder the joint descriptors based on the topological sort
-            joint_descriptors = [joint_descriptors[i] for i in joint_indices]
+            articulation_joint_descriptors = [articulation_joint_descriptors[i] for i in joint_indices]
+            joint_descriptors = articulation_joint_descriptors + excluded_joint_descriptors
 
         # Add all descriptors to the builder
         for joint_desc in joint_descriptors:
