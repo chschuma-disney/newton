@@ -387,7 +387,10 @@ def build_box_pendulum(
 
     # Add a static collision geometry for the plane
     if ground:
-        _add_ground_box(_builder)
+        _builder.add_ground_plane(
+            cfg=_shape_cfg_basic(),
+            label="ground",
+        )
 
     # Close the world context if we opened one
     if new_world or builder is None:
@@ -484,7 +487,10 @@ def build_box_pendulum_vertical(
 
     # Add a static collision geometry for the plane
     if ground:
-        _add_ground_box(_builder)
+        _builder.add_ground_plane(
+            cfg=_shape_cfg_basic(),
+            label="ground",
+        )
 
     # Close the world context if we opened one
     if new_world or builder is None:
@@ -648,14 +654,10 @@ def build_cartpole(
 
     # Add a static collision geometry for the plane
     if ground:
-        _builder.add_shape_box(
-            label="ground",
-            body=-1,
-            hx=10.0,
-            hy=10.0,
-            hz=0.5,
-            xform=wp.transformf(0.0, 0.0, -1.0 + z_offset, 0.0, 0.0, 0.0, 1.0),
+        _builder.add_ground_plane(
+            height=-1.0 + z_offset,
             cfg=_shape_cfg_basic(),
+            label="ground",
         )
 
     # Close the world context if we opened one
@@ -1103,7 +1105,10 @@ def build_boxes_nunchaku(
 
     # Add a static collision geometry for the plane
     if ground:
-        _add_ground_box(_builder)
+        _builder.add_ground_plane(
+            cfg=_shape_cfg_basic(),
+            label="ground",
+        )
 
     # Close the world context if we opened one
     if new_world or builder is None:
@@ -1259,7 +1264,10 @@ def build_boxes_nunchaku_vertical(
 
     # Add a static collision geometry for the plane
     if ground:
-        _add_ground_box(_builder)
+        _builder.add_ground_plane(
+            cfg=_shape_cfg_basic(),
+            label="ground",
+        )
 
     # Close the world context if we opened one
     if new_world or builder is None:
@@ -1284,6 +1292,7 @@ def build_boxes_fourbar(
     friction: float | None = None,
     restitution: float | None = None,
     use_custom_shape_cfg: bool = False,
+    scaling: float = 1.0,
 ) -> ModelBuilder:
     """
     Constructs a basic model of a four-bar linkage.
@@ -1330,6 +1339,8 @@ def build_boxes_fourbar(
             the free-base joint; Newton's free joint does not expose an analogous flag
             and the value is currently ignored for the base joint.\n
             If `None`, defaults to `[1, 3]`.
+        scaling (float):
+            Scaling of the model dimensions.
 
     Returns:
         ModelBuilder: A model builder containing the four-bar linkage.
@@ -1361,12 +1372,12 @@ def build_boxes_fourbar(
     z_0 = z_offset
 
     # Box dimensions
-    d = 0.01
-    w = 0.01
-    h = 0.1
+    d = 0.01 * scaling
+    w = 0.01 * scaling
+    h = 0.1 * scaling
 
     # Margins
-    mj = 0.001
+    mj = 0.001 * scaling
     dj = 0.5 * d + mj
 
     ###
@@ -1388,7 +1399,7 @@ def build_boxes_fourbar(
     h_4 = h
 
     # Inertial properties
-    m_i = 1.0
+    m_i = 1.0 * scaling**3
     i_I_i_1 = inertia.compute_inertia_box_from_mass(mass=m_i, hx=0.5 * d_1, hy=0.5 * w_1, hz=0.5 * h_1)
     i_I_i_2 = inertia.compute_inertia_box_from_mass(mass=m_i, hx=0.5 * d_2, hy=0.5 * w_2, hz=0.5 * h_2)
     i_I_i_3 = inertia.compute_inertia_box_from_mass(mass=m_i, hx=0.5 * d_3, hy=0.5 * w_3, hz=0.5 * h_3)
@@ -1477,8 +1488,8 @@ def build_boxes_fourbar(
     # Use custom shape config if requested
     custom_shape_cfg = (
         ModelBuilder.ShapeConfig(
-            gap=0.01,
-            margin=1e-6,
+            gap=0.01 * scaling,
+            margin=1e-6 * scaling,
             mu=friction if friction is not None else _builder.default_shape_cfg.mu,
             restitution=restitution if restitution is not None else _builder.default_shape_cfg.restitution,
         )
@@ -1673,7 +1684,7 @@ def make_basics_heterogeneous_builder(
             An optional existing model builder to populate.\n
             If `None`, a new builder is created.
         ground (bool):
-            Whether to add a static ground plane to each sub-model.
+            Whether to add a static global ground plane.
         dynamic_joints (bool):
             Whether to enable dynamic (armature/friction) joint terms in the sub-models
             that expose the option (box pendulum, hinged boxes, four-bar).
@@ -1690,19 +1701,27 @@ def make_basics_heterogeneous_builder(
     else:
         _builder = builder
 
+    if ground:
+        # Build a single ground plane shared among all models
+        _builder.add_ground_plane(
+            cfg=_shape_cfg_basic(),
+            label="ground",
+        )
+
     # Add each basic model as its own world, following the Kamino ordering
     _builder.add_world(
         build_boxes_fourbar(
-            ground=ground,
+            ground=False,
             dynamic_joints=dynamic_joints,
             implicit_pd=implicit_pd,
             new_world=True,
+            scaling=7.0,  # Align model scale with dimensions of other models
         )
     )
-    _builder.add_world(build_boxes_nunchaku(ground=ground, new_world=True))
+    _builder.add_world(build_boxes_nunchaku(ground=False, new_world=True))
     _builder.add_world(
         build_boxes_hinged(
-            ground=ground,
+            ground=False,
             dynamic_joints=dynamic_joints,
             implicit_pd=implicit_pd,
             new_world=True,
@@ -1710,14 +1729,14 @@ def make_basics_heterogeneous_builder(
     )
     _builder.add_world(
         build_box_pendulum(
-            ground=ground,
+            ground=False,
             dynamic_joints=dynamic_joints,
             implicit_pd=implicit_pd,
             new_world=True,
         )
     )
-    _builder.add_world(build_box_on_plane(ground=ground, new_world=True))
-    _builder.add_world(build_cartpole(z_offset=0.5, ground=ground, new_world=True))
+    _builder.add_world(build_box_on_plane(ground=False, new_world=True))
+    _builder.add_world(build_cartpole(z_offset=1.0, ground=False, new_world=True))
 
     # Return the populated model builder
     return _builder

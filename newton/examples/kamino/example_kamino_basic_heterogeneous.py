@@ -38,7 +38,6 @@ class Example:
             asset_builder.default_shape_cfg.gap = 0.0
             asset_builder.add_usd(
                 asset_file,
-                joint_ordering=None,
                 force_show_colliders=True,
                 force_position_velocity_actuation=True,
                 enable_self_collisions=False,
@@ -67,13 +66,13 @@ class Example:
             basics.make_basics_heterogeneous_builder(builder=builder, ground=True)
 
         # Create the model from the builder
-        self.model = builder.finalize(skip_validation_joints=True)
+        self.model = builder.finalize()
 
         # Create and configure settings for SolverKamino and the collision detector
         solver_config = newton.solvers.SolverKamino.Config.from_model(self.model)
         solver_config.use_collision_detector = True
         solver_config.use_fk_solver = True
-        solver_config.collision_detector.pipeline = "primitive"
+        solver_config.collision_detector.pipeline = "unified"
         solver_config.collision_detector.max_contacts = 32 * self.model.world_count
         solver_config.dynamics.preconditioning = True
         solver_config.padmm.primal_tolerance = 1e-4
@@ -156,7 +155,7 @@ class Example:
         parser.add_argument(
             "--from-usd",
             action=argparse.BooleanOptionalAction,
-            default=True,
+            default=False,
             help="Load the heterogeneous basic models from USD (otherwise build them manually).",
         )
         return parser
