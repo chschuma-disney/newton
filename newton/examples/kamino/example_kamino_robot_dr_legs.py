@@ -37,13 +37,11 @@ class Example:
 
         # Load the DR Legs USD and add it to the builder
         asset_path = newton.utils.download_asset("disneyresearch")
-        asset_file = str(asset_path / "dr_legs/usd" / "dr_legs_with_meshes_and_boxes.usda")
+        asset_file = str(asset_path / "dr_legs" / "usd" / "dr_legs_with_meshes_and_boxes.usda")
         robot_builder.add_usd(
             asset_file,
-            joint_ordering=None,
             force_show_colliders=True,
             force_position_velocity_actuation=True,
-            collapse_fixed_joints=False,  # TODO @cavemor: Fails when True, investigate (doesn't have fixed joints)
             enable_self_collisions=False,
             hide_collision_shapes=True,
         )
@@ -61,8 +59,8 @@ class Example:
         builder.add_ground_plane()
 
         # Create the model from the builder
-        self.model = builder.finalize(skip_validation_joints=True)
-        self.model.rigid_contact_max = 72
+        self.model = builder.finalize()
+        self.model.rigid_contact_max = 72 * self.world_count
 
         # Create the Kamino solver for the given model
         self.config = newton.solvers.SolverKamino.Config.from_model(self.model)
