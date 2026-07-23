@@ -11,12 +11,14 @@ See the :mod:`newton._src.solvers.kamino.solvers.padmm` module for a detailed de
 
 from __future__ import annotations
 
+import numpy as np
 import warp as wp
 
 from ....config import PADMMSolverConfig
 from ...core.data import DataKamino
 from ...core.model import ModelKamino
 from ...core.size import SizeKamino
+from ...dynamics.delassus import BlockSparseMatrixFreeDelassusOperator, DelassusOperator
 from ...dynamics.dual import DualProblem
 from ...geometry.contacts import ContactsKamino
 from ...kinematics.limits import LimitsKamino
@@ -54,6 +56,112 @@ from .types import (
     PADMMWarmStartMode,
     convert_config_to_struct,
 )
+
+project_to_subspace: bool = False
+
+
+def extract_delassus(
+    delassus: DelassusOperator | BlockSparseMatrixFreeDelassusOperator,
+    only_active_dims: bool = False,
+) -> list[np.ndarray]:
+    if isinstance(delassus, BlockSparseMatrixFreeDelassusOperator):
+        return extract_delassus_sparse(delassus=delassus, only_active_dims=only_active_dims)
+
+    maxdim_wp_np = delassus.info.maxdim.numpy()
+    dim_wp_np = delassus.info.dim.numpy()
+    mio_wp_np = delassus.info.mio.numpy()
+    D_wp_np = delassus.D.numpy()
+
+    # Extract each Delassus matrix for each world
+    D_mat: list[np.ndarray] = []
+    for i in range(delassus.num_worlds):
+        D_maxdim = maxdim_wp_np[i]
+        D_start = mio_wp_np[i]
+        if only_active_dims:
+            D_dim = dim_wp_np[i]
+        else:
+            D_dim = D_maxdim
+        D_end = D_start + D_dim * D_dim
+        D_mat.append(D_wp_np[D_start:D_end].reshape((D_dim, D_dim)))
+
+    # Return the list of Delassus matrices
+    return D_mat
+
+
+def extract_delassus_sparse(
+    delassus: BlockSparseMatrixFreeDelassusOperator, only_active_dims: bool = False
+) -> list[np.ndarray]:
+    """
+    Extracts the (dense) Delassus matrix from the sparse matrix-free Delassus operator by querying
+    individual matrix columns.
+    """
+    num_worlds = delassus._model.size.num_worlds
+    sum_max_cts = delassus._model.size.sum_of_max_total_cts
+    max_cts_np = delassus._model.info.max_total_cts.numpy()
+
+    num_cts = delassus._data.info.num_total_cts
+    num_cts_np = num_cts.numpy()
+    max_dim = np.max(num_cts_np) if only_active_dims else np.max(max_cts_np)
+
+    D_mat: list[np.ndarray] = []
+    for world_id in range(num_worlds):
+        if only_active_dims:
+            D_mat.append(np.zeros((num_cts_np[world_id], num_cts_np[world_id]), dtype=np.float32))
+        else:
+            D_mat.append(np.zeros((max_cts_np[world_id], max_cts_np[world_id]), dtype=np.float32))
+
+    vec_query = wp.empty((sum_max_cts,), dtype=wp.float32, device=delassus._device)
+    vec_response = wp.empty((sum_max_cts,), dtype=wp.float32, device=delassus._device)
+
+    @wp.kernel
+    def _set_unit_entry(
+        # Inputs:
+        index: int,
+        world_dim: wp.array[wp.int32],
+        entry_start: wp.array[wp.int32],
+        # Output:
+        x: wp.array[wp.float32],
+    ):
+        world_id = wp.tid()
+
+        if index >= world_dim[world_id]:
+            return
+
+        x[entry_start[world_id] + index] = 1.0
+
+    entry_start_np = delassus.bsm.row_start.numpy()
+
+    world_mask = wp.ones((num_worlds,), dtype=wp.bool, device=delassus._device)
+
+    for dim in range(max_dim):
+        # Query the operator by computing the product with a vector where only entry `dim` is set to 1.
+        vec_query.zero_()
+        wp.launch(
+            kernel=_set_unit_entry,
+            dim=num_worlds,
+            inputs=[
+                # Inputs:
+                dim,
+                num_cts,
+                delassus.bsm.row_start,
+                # Outputs:
+                vec_query,
+            ],
+            device=delassus._device,
+        )
+        delassus.matvec(vec_query, vec_response, world_mask)
+        vec_response_np = vec_response.numpy()
+
+        # Set the response as the corresponding column of each matrix
+        for world_id in range(num_worlds):
+            D_mat_dim = D_mat[world_id].shape[0]
+            if dim >= D_mat_dim:
+                continue
+            start_idx = entry_start_np[world_id]
+            D_mat[world_id][:, dim] = vec_response_np[start_idx : start_idx + D_mat_dim]
+
+    return D_mat
+
 
 ###
 # Module interface
@@ -142,6 +250,9 @@ class PADMMSolver:
 
         # Declare the device cache
         self._device: wp.DeviceLike = None
+
+        self._range_basis = None
+        self._nullspace_basis = None
 
         # Perform memory allocations if a model is provided
         if model is not None:
@@ -281,6 +392,8 @@ class PADMMSolver:
         block_dim = get_block_dim(tile_size, ratio=2, min_size=1)
         self._project_dual_convergence_accel_kernel = _make_project_dual_convergence_accel_kernel(block_dim)
 
+        self._step_id = 0
+
     def reset(self, problem: DualProblem | None = None, world_mask: wp.array[wp.bool] | None = None):
         """
         Resets the all internal solver data to sentinel values.
@@ -307,6 +420,8 @@ class PADMMSolver:
                 ],
                 device=self.device,
             )
+
+        self._step_id = 0
 
     def coldstart(self):
         """
@@ -385,6 +500,9 @@ class PADMMSolver:
         Args:
             problem: The dual forward dynamics problem to be solved.
         """
+
+        self._iteration = 0
+
         # Pass the PADMM-owned tolerance array to the iterative linear solver (if present), so the
         # inexact-ADMM tolerance schedule (set in the convergence kernel) drives the inner solve.
         inner = getattr(problem._delassus._solver, "solver", None)
@@ -402,6 +520,24 @@ class PADMMSolver:
         # D_{eta,rho} := D + (eta + rho) * I_{ncts}
         self._update_regularization(problem)
 
+        # if self._nullspace_basis is None:
+        if project_to_subspace:
+            D_np = extract_delassus(problem._delassus, only_active_dims=True)[0]
+            sigma_np = self._data.state.sigma.numpy()[0]
+
+            eigvals, eigvecs = np.linalg.eigh(D_np)
+            tol = 1e-6 + sigma_np[0] - sigma_np[1]
+            # range_basis = eigvecs[:, eigvals > tol]
+            self._nullspace_basis = eigvecs[:, eigvals <= tol]
+            self._range_basis = eigvecs[:, eigvals > tol]
+            # print(self._nullspace_basis.shape[1])
+
+        # nullspace_dim = self._nullspace_basis.shape[0]
+
+        # v_f_np = problem.data.v_f.numpy()
+        # v_f_np[:nullspace_dim] -= self._nullspace_basis @ (self._nullspace_basis.T @ v_f_np[:nullspace_dim])
+        # problem.data.v_f.assign(v_f_np)
+
         # Reset the solver info to zero if collection is enabled
         if self._collect_info:
             self._data.info.zero()
@@ -416,6 +552,8 @@ class PADMMSolver:
 
         # Update the final solution from the terminal PADMM state
         self._update_solution(problem)
+
+        self._step_id += 1
 
     ###
     # Internals - High-Level Operations
@@ -569,6 +707,20 @@ class PADMMSolver:
         # Compute the unconstrained solution and store in the primal variables
         self._update_unconstrained_solution(problem)
 
+        if self._nullspace_basis is not None and self._nullspace_basis.size > 0:
+            basis_dim = self._range_basis.shape[0]
+            x_np = self._data.state.x.numpy()[:basis_dim]
+            x_p_np = self._data.state.x_p.numpy()[:basis_dim]
+
+            print(
+                f"{self._step_id} {self._iteration} Range basis residual:",
+                np.max(np.abs(self._range_basis.T @ (x_np - x_p_np))),
+            )
+            print(
+                f"{self._step_id} {self._iteration} Null basis residual:",
+                np.max(np.abs(self._nullspace_basis.T @ (x_np - x_p_np))),
+            )
+
         # Compute the argument to the projection operator with over-relaxation
         self._update_projection_argument(problem, self._data.state.z_p)
 
@@ -592,6 +744,8 @@ class PADMMSolver:
 
         # Update caches of previous state variables
         self._update_previous_state()
+
+        self._iteration += 1
 
     def _step_accel(self, problem: DualProblem):
         """
@@ -948,6 +1102,10 @@ class PADMMSolver:
             ],
             device=self.device,
         )
+        # import numpy as np
+
+        # np.set_printoptions(linewidth=np.inf)
+        # print("v:", self._data.state.v.numpy()[:24])
 
     def _update_desaxce_and_velocity_bias(self, problem: DualProblem, y: wp.array[wp.float32], z: wp.array[wp.float32]):
         """Fused De Saxce correction + velocity bias in a single kernel launch.
@@ -964,6 +1122,12 @@ class PADMMSolver:
             y: The primal variable array from the previous iteration.
             z: The dual variable array from the previous iteration.
         """
+
+        # import numpy as np
+
+        # np.set_printoptions(linewidth=np.inf)
+        # print("z:", z.numpy()[:20])
+
         has_contacts = self._size.max_of_max_contacts > 0
         kernel = make_desaxce_correction_and_velocity_bias_kernel(has_contacts, self._collect_info)
         wp.launch(
@@ -989,6 +1153,9 @@ class PADMMSolver:
             device=self.device,
         )
 
+        # np.set_printoptions(linewidth=np.inf)
+        # print("v:", self._data.state.v.numpy()[:20])
+
     def _update_unconstrained_solution(self, problem: DualProblem):
         """
         Launches a kernel to solve the unconstrained sub-problem for the primal variables.
@@ -1002,6 +1169,30 @@ class PADMMSolver:
         # wp.copy(self._data.state.x, self._data.state.v)
         # problem._delassus.solve_inplace(x=self._data.state.x)
         problem._delassus.solve(v=self._data.state.v, x=self._data.state.x)
+
+        # import os
+
+        # D = extract_delassus(problem._delassus, only_active_dims=True)[0]
+        # v = self._data.state.v.numpy()[: D.shape[0]]
+        # # x = self._data.state.x.numpy()[:D.shape[0]]
+
+        # L = np.linalg.cholesky(D)
+        # y = np.linalg.solve(L, v)
+        # x_np = np.linalg.solve(L.T, y)
+
+        # x = self._data.state.x.numpy()
+        # x[: D.shape[0]] = x_np
+        # self._data.state.x.assign(x)
+
+        # os.makedirs("numpy", exist_ok=True)
+
+        # output_dir = "C:\\Code\\newton\\src\\newton\\newton\\examples\\kamino\\numpy"
+        # np.save(f"{output_dir}/D_{self._step_id}_{self._iteration}.npy", D)
+        # np.save(f"{output_dir}/v_{self._step_id}_{self._iteration}.npy", v)
+        # np.save(f"{output_dir}/x_{self._step_id}_{self._iteration}.npy", x)
+
+        # np.set_printoptions(linewidth=np.inf)
+        # print("x:", self._data.state.x.numpy()[:20])
 
     def _update_projection_argument(self, problem: DualProblem, z: wp.array[wp.float32]):
         """
@@ -1113,6 +1304,21 @@ class PADMMSolver:
         Args:
             problem: The dual forward dynamics problem to be solved.
         """
+        import numpy as np  # noqa: PLC0415
+
+        np.set_printoptions(linewidth=np.inf)
+
+        # print("x_p:", self._data.state.x_p.numpy()[:20])
+        # print("x:", self._data.state.x.numpy()[:20])
+        # print("x_p - x:", self._data.state.x_p.numpy()[:20] - self._data.state.x.numpy()[:20])
+        # print("| x_p - x |:", np.linalg.norm(self._data.state.x_p.numpy()[:20] - self._data.state.x.numpy()[:20]))
+
+        # print("y_p:", self._data.state.y_p.numpy()[:20])
+        # print("y:", self._data.state.y.numpy()[:20])
+        # print("y_p - y:", self._data.state.y_p.numpy()[:20] - self._data.state.y.numpy()[:20])
+
+        # print("x - y:", self._data.state.x.numpy()[:20] - self._data.state.y.numpy()[:20])
+
         # Update the dual variables and compute primal-dual residuals from the current state
         # NOTE: These are combined into a single kernel to reduce kernel launch overhead
         wp.launch(
@@ -1142,7 +1348,12 @@ class PADMMSolver:
             device=self.device,
         )
 
-        # Compute complementarity residual from the current state.
+        # print("z_p:", self._data.state.z_p.numpy()[:20])
+        # print("z:", self._data.state.z.numpy()[:20])
+
+        # print("r_dual:", self._data.residuals.r_dual.numpy()[:20])
+
+        # Compute complementarity residual from the current state
         self._update_complementarity_residuals(problem)
 
     def _update_projection_dual_convergence_accel(self, problem: DualProblem):

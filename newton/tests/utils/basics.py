@@ -1284,6 +1284,7 @@ def build_boxes_fourbar(
     friction: float | None = None,
     restitution: float | None = None,
     use_custom_shape_cfg: bool = False,
+    overconstrained: bool = True,
 ) -> ModelBuilder:
     """
     Constructs a basic model of a four-bar linkage.
@@ -1615,25 +1616,57 @@ def build_boxes_fourbar(
         child_xform=wp.transformf(r_j1 - r_b2, wp.quat_identity(dtype=wp.float32)),
     )
 
-    # Add a revolute joint between link 2 and link 3
-    j2 = _builder.add_joint_revolute(
-        label="link2_to_link3",
-        parent=bid2,
-        child=bid3,
-        axis=effort_joint_other if 2 in actuator_ids else passive_joint_dof_config,
-        parent_xform=wp.transformf(r_j2 - r_b2, wp.quat_identity(dtype=wp.float32)),
-        child_xform=wp.transformf(r_j2 - r_b3, wp.quat_identity(dtype=wp.float32)),
-    )
+    if overconstrained:
+        # Add a revolute joint between link 2 and link 3
+        j2 = _builder.add_joint_revolute(
+            label="link2_to_link3",
+            parent=bid2,
+            child=bid3,
+            axis=effort_joint_other if 2 in actuator_ids else passive_joint_dof_config,
+            parent_xform=wp.transformf(r_j2 - r_b2, wp.quat_identity(dtype=wp.float32)),
+            child_xform=wp.transformf(r_j2 - r_b3, wp.quat_identity(dtype=wp.float32)),
+        )
 
-    # Add a revolute joint between link 3 and link 4
-    j3 = _builder.add_joint_revolute(
-        label="link3_to_link4",
-        parent=bid3,
-        child=bid4,
-        axis=effort_joint_other if 3 in actuator_ids else passive_joint_dof_config,
-        parent_xform=wp.transformf(r_j3 - r_b3, wp.quat_identity(dtype=wp.float32)),
-        child_xform=wp.transformf(r_j3 - r_b4, wp.quat_identity(dtype=wp.float32)),
-    )
+        # Add a revolute joint between link 3 and link 4
+        j3 = _builder.add_joint_revolute(
+            label="link3_to_link4",
+            parent=bid3,
+            child=bid4,
+            axis=effort_joint_other if 3 in actuator_ids else passive_joint_dof_config,
+            parent_xform=wp.transformf(r_j3 - r_b3, wp.quat_identity(dtype=wp.float32)),
+            child_xform=wp.transformf(r_j3 - r_b4, wp.quat_identity(dtype=wp.float32)),
+        )
+    else:
+        # Add a 2-DoF rotational joint between link 2 and link 3
+        j2_axes = [
+            ModelBuilder.JointDofConfig(
+                axis=Axis.Y,
+                actuator_mode=JointTargetMode.NONE,
+                limit_lower=qmin,
+                limit_upper=qmax,
+            ),
+            ModelBuilder.JointDofConfig(
+                axis=Axis.Z,
+                actuator_mode=JointTargetMode.NONE,
+            ),
+        ]
+        j2 = _builder.add_joint_d6(
+            label="link2_to_link3",
+            parent=bid2,
+            child=bid3,
+            parent_xform=wp.transformf(r_j2 - r_b2, wp.quat_identity(dtype=wp.float32)),
+            child_xform=wp.transformf(r_j2 - r_b3, wp.quat_identity(dtype=wp.float32)),
+            angular_axes=j2_axes,
+        )
+
+        # Add a spherical joint between link 3 and link 4
+        j3 = _builder.add_joint_ball(
+            label="link3_to_link4",
+            parent=bid3,
+            child=bid4,
+            parent_xform=wp.transformf(r_j3 - r_b3, wp.quat_identity(dtype=wp.float32)),
+            child_xform=wp.transformf(r_j3 - r_b4, wp.quat_identity(dtype=wp.float32)),
+        )
 
     # Add a revolute joint between link 4 and link 1 (closes the loop)
     _builder.add_joint_revolute(
