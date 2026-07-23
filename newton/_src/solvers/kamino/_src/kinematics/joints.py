@@ -387,6 +387,21 @@ def joint_constraint_angular_residual_universal(j_q_j: wp.quatf) -> wp.vec3f:
 
 
 @wp.func
+def joint_constraint_angular_residual_passive_universal(
+    q_B: wp.quatf,
+    q_F: wp.quatf,
+    X_Bj: wp.mat33f,
+) -> wp.float32:
+    """Returns the third rotational constraint for passive universal joints."""
+    X_T = wp.transpose(X_Bj)
+    a_x = wp.vec3f(X_T[0, 0], X_T[0, 1], X_T[0, 2])
+    a_y = wp.vec3f(X_T[1, 0], X_T[1, 1], X_T[1, 2])
+    a_x_base = wp.quat_rotate(q_B, a_x)
+    a_y_follower = wp.quat_rotate(q_F, a_y)
+    return -wp.dot(a_x_base, a_y_follower)
+
+
+@wp.func
 def joint_constraint_angular_residual_fixed(j_q_j: wp.quatf) -> wp.vec3f:
     """Returns the joint constraint residual for a fixed joint."""
     return quat_log(j_q_j)
@@ -1132,6 +1147,15 @@ def make_compute_joints_data_kernel(correction: JointCorrectionMode = JointCorre
             data_joint_q_j,
             data_joint_dq_j,
         )
+
+        if dof_type == JointDoFType.UNIVERSAL and act_type == JointActuationType.PASSIVE:
+            q_B_j = wp.quatf(0.0, 0.0, 0.0, 1.0)
+            if bid_B > -1:
+                q_B_j = wp.transform_get_rotation(T_B_j)
+            q_F_j = wp.transform_get_rotation(T_F_j)
+            data_joint_r_j[kinematic_cts_offset + 3] = joint_constraint_angular_residual_passive_universal(
+                q_B_j, q_F_j, X_Bj
+            )
 
         # Compute and store the implicit dynamics
         # for the dynamic constraints of the joint

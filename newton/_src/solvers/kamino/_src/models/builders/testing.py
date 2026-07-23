@@ -843,6 +843,7 @@ def build_binary_universal_joint_test(
     limits: bool = True,
     ground: bool = True,
     world_index: int = 0,
+    act_type: JointActuationType = JointActuationType.FORCE,
 ) -> ModelBuilderKamino:
     """
     Builds a world to test binary universal joints.
@@ -860,6 +861,7 @@ def build_binary_universal_joint_test(
             argument is ignored, and the index of the newly created world will be used instead.
         limits: Whether to enable limits on the joint degrees of freedom.
         world_index: The index of the world in the builder where the test model should be added.
+        act_type: Actuation type for the universal joint under test.
     """
     # Create a new builder if none is provided
     if builder is None:
@@ -902,7 +904,7 @@ def build_binary_universal_joint_test(
     _builder.add_joint(
         name="base_to_follower_universal",
         dof_type=JointDoFType.UNIVERSAL,
-        act_type=JointActuationType.FORCE,
+        act_type=act_type,
         bid_B=bid_B,
         bid_F=bid_F,
         B_r_Bj=wp.vec3f(0.25, -0.25, -0.25),

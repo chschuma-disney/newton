@@ -10,30 +10,60 @@ import unittest
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.kamino._src.core.joints import JointActuationType, JointDoFType
+from newton._src.solvers.kamino._src.core.math import compute_body_pose_update_with_logmap, quat_exp
 from newton._src.solvers.kamino._src.core.model import ModelKamino
 from newton._src.solvers.kamino._src.geometry.contacts import ContactsKamino
 from newton._src.solvers.kamino._src.kinematics.constraints import make_unilateral_constraints_info
 from newton._src.solvers.kamino._src.kinematics.jacobians import (
     ColMajorSparseConstraintJacobians,
+    ConstraintJacobianMethod,
     DenseSystemJacobians,
     SparseSystemJacobians,
 )
+from newton._src.solvers.kamino._src.kinematics.joints import compute_joints_data
 from newton._src.solvers.kamino._src.kinematics.limits import LimitsKamino
 from newton._src.solvers.kamino._src.models.builders.basics import (
     build_boxes_fourbar,
     make_basics_heterogeneous_builder,
 )
+from newton._src.solvers.kamino._src.models.builders.testing import (
+    build_binary_revolute_joint_test,
+    build_binary_universal_joint_test,
+)
 from newton._src.solvers.kamino._src.models.builders.utils import make_homogeneous_builder
 from newton._src.solvers.kamino._src.utils import logger as msg
-from newton.tests.kamino import setup_tests, test_context
-from newton.tests.kamino.utils.extract import extract_cts_jacobians, extract_dofs_jacobians
-from newton.tests.kamino.utils.make import make_test_problem_fourbar, make_test_problem_heterogeneous
+from newton.tests import setup_tests, test_context
+from newton.tests.utils.extract import extract_cts_jacobians, extract_dofs_jacobians
+from newton.tests.utils.make import (
+    make_test_problem,
+    make_test_problem_fourbar,
+    make_test_problem_heterogeneous,
+)
 
 ###
 # Module configs
 ###
 
 wp.set_module_options({"enable_backward": False})
+
+
+@wp.kernel
+def _integrate_body_poses_logmap(
+    poses_in: wp.array[wp.transformf],
+    twists: wp.array[wp.spatial_vectorf],
+    dt: wp.float32,
+    poses_out: wp.array[wp.transformf],
+):
+    """Integrate body poses with the same log-map update used by :class:`IntegratorEuler`."""
+    i = wp.tid()
+    u_i = twists[i]
+    poses_out[i] = compute_body_pose_update_with_logmap(
+        dt,
+        poses_in[i],
+        wp.spatial_top(u_i),
+        wp.spatial_bottom(u_i),
+    )
 
 
 ###
@@ -1112,6 +1142,345 @@ class TestKinematicsSparseSystemJacobians(unittest.TestCase):
 
         # Check that Jacobians match
         self._compare_row_col_major_jacobians(jacobians, jacobian_col_maj)
+
+
+class TestKinematicsAnalyticSystemJacobians(unittest.TestCase):
+    """Verify analytic joint Jacobians match residual time derivatives."""
+
+    def setUp(self):
+        if not test_context.setup_done:
+            setup_tests(clear_cache=False)
+        self.default_device = wp.get_device(test_context.device)
+
+    def tearDown(self):
+        self.default_device = None
+
+    def _build_joint_jacobians(
+        self,
+        model,
+        data,
+        limits,
+        contacts,
+        sparse: bool,
+        method: ConstraintJacobianMethod,
+    ):
+        """Build Jacobians for the given method and storage format."""
+        if sparse:
+            jacobians = SparseSystemJacobians(
+                model=model,
+                limits=limits,
+                contacts=contacts,
+                constraint_jacobian_method=method,
+            )
+        else:
+            jacobians = DenseSystemJacobians(
+                model=model,
+                limits=limits,
+                contacts=contacts,
+                constraint_jacobian_method=method,
+            )
+        jacobians.build(
+            model=model,
+            data=data,
+            limits=limits.data if limits is not None else None,
+            contacts=contacts.data if contacts is not None else None,
+        )
+        wp.synchronize()
+        return jacobians
+
+    def _integrate_body_transforms(self, transforms: np.ndarray, twists: np.ndarray, dt: float) -> np.ndarray:
+        """Apply world-frame body twists using the production log-map pose update."""
+        device = self.default_device
+        poses_in = wp.array(transforms, dtype=wp.transformf, device=device)
+        twists_in = wp.array(twists, dtype=wp.spatial_vectorf, device=device)
+        poses_out = wp.empty_like(poses_in)
+        wp.launch(
+            _integrate_body_poses_logmap,
+            dim=transforms.shape[0],
+            inputs=[poses_in, twists_in, wp.float32(dt), poses_out],
+            device=device,
+        )
+        return poses_out.numpy()
+
+    def _finite_difference_joint_constraint_rates(
+        self,
+        model,
+        data,
+        dt: float = 1e-4,
+    ) -> np.ndarray:
+        """Estimate ``dr_j/dt`` from a log-map pose step along ``data.bodies.u_i``."""
+        r0 = data.joints.r_j.numpy().copy()
+        q0 = data.bodies.q_i.numpy().copy()
+        u = data.bodies.u_i.numpy().copy()
+        q1 = self._integrate_body_transforms(q0, u, dt)
+
+        data_pert = model.data()
+        data_pert.bodies.q_i.assign(q1)
+        compute_joints_data(model=model, data=data_pert, q_j_p=wp.zeros_like(data.joints.q_j))
+        wp.synchronize()
+        r1 = data_pert.joints.r_j.numpy()
+        return (r1 - r0) / dt
+
+    def _set_nonzero_body_twists(self, model, data):
+        """Assign non-zero twists so the chain-rule check is non-trivial."""
+        u_host = data.bodies.u_i.numpy().copy()
+        bodies_offset = model.info.bodies_offset.numpy()
+        num_body_dofs = model.info.num_body_dofs.numpy()
+        for wid in range(model.info.num_worlds):
+            bio = int(bodies_offset[wid])
+            num_bodies = int(num_body_dofs[wid]) // 6
+            for loc in range(num_bodies):
+                bid = bio + loc
+                u_host[bid] = np.array(
+                    [0.1, -0.05, 0.02, 0.05 * loc, 0.4 + 0.03 * loc, 0.15 - 0.02 * loc],
+                    dtype=np.float32,
+                )
+        data.bodies.u_i.assign(u_host)
+        compute_joints_data(model=model, data=data, q_j_p=wp.zeros_like(data.joints.q_j))
+        wp.synchronize()
+
+    def _prepare_chain_rule_state(self, model, data):
+        """Assign non-zero twists and a small pose tilt for finite rotation residuals."""
+        self._set_nonzero_body_twists(model, data)
+        q_host = data.bodies.q_i.numpy().copy()
+        bodies_offset = model.info.bodies_offset.numpy()
+        num_body_dofs = model.info.num_body_dofs.numpy()
+        for wid in range(model.info.num_worlds):
+            bio = int(bodies_offset[wid])
+            num_bodies = int(num_body_dofs[wid]) // 6
+            for loc in range(num_bodies):
+                bid = bio + loc
+                q_old = wp.quatf(q_host[bid, 3], q_host[bid, 4], q_host[bid, 5], q_host[bid, 6])
+                tilt = quat_exp(wp.vec3f(0.02 * loc, 0.12 + 0.03 * loc, 0.05 * loc))
+                q_new = tilt * q_old
+                q_host[bid, 3] = q_new.x
+                q_host[bid, 4] = q_new.y
+                q_host[bid, 5] = q_new.z
+                q_host[bid, 6] = q_new.w
+        data.bodies.q_i.assign(q_host)
+        compute_joints_data(model=model, data=data, q_j_p=wp.zeros_like(data.joints.q_j))
+        wp.synchronize()
+
+    def _assert_analytic_satisfies_residual_chain_rule_with_tilt(self, model, data, limits, contacts, sparse: bool):
+        """Like ``_assert_analytic_satisfies_residual_chain_rule`` but with pose tilt."""
+        self._prepare_chain_rule_state(model, data)
+        jacobian = self._build_joint_jacobians(model, data, limits, contacts, sparse, ConstraintJacobianMethod.ANALYTIC)
+        dr_numeric = self._finite_difference_joint_constraint_rates(model, data)
+        dr_analytic = self._kinematic_constraint_rates_from_jacobian(model, data, jacobian)
+        np.testing.assert_allclose(dr_analytic, dr_numeric, rtol=5e-2, atol=5e-2)
+
+    def _assert_analytic_satisfies_residual_chain_rule_for_dof_types(
+        self,
+        model,
+        data,
+        limits,
+        contacts,
+        sparse: bool,
+        dof_types: set[int],
+        *,
+        use_tilt: bool = False,
+    ):
+        """Verify ``J_cts @ u`` for kinematic rows belonging to selected joint DoF types."""
+        if use_tilt:
+            self._prepare_chain_rule_state(model, data)
+        else:
+            self._set_nonzero_body_twists(model, data)
+        jacobian = self._build_joint_jacobians(model, data, limits, contacts, sparse, ConstraintJacobianMethod.ANALYTIC)
+        dr_numeric = self._finite_difference_joint_constraint_rates(model, data)
+        dr_analytic = self._kinematic_constraint_rates_from_jacobian(model, data, jacobian)
+        dof_type = model.joints.dof_type.numpy()
+        num_kin = model.joints.num_kinematic_cts.numpy()
+        ana_sel = []
+        num_sel = []
+        idx = 0
+        for jid in range(model.size.sum_of_num_joints):
+            dof = int(dof_type[jid])
+            for local in range(int(num_kin[jid])):
+                if dof in dof_types:
+                    ana_sel.append(dr_analytic[idx])
+                    num_sel.append(dr_numeric[idx])
+                idx += 1
+        np.testing.assert_allclose(np.array(ana_sel), np.array(num_sel), rtol=5e-2, atol=5e-2)
+
+    def _kinematic_constraint_rates_from_jacobian(self, model, data, jacobian) -> np.ndarray:
+        """Compute ``dr_j/dt`` from ``J_cts`` for kinematic joint constraints only."""
+        J_cts = extract_cts_jacobians(model, None, None, jacobian)
+        u_host = data.bodies.u_i.numpy()
+        bodies_offset = model.info.bodies_offset.numpy()
+        num_body_dofs = model.info.num_body_dofs.numpy()
+        world_cts_offset = model.info.total_cts_offset.numpy()
+        joint_wid = model.joints.wid.numpy()
+        kin_total = model.joints.kinematic_cts_offset_total_cts.numpy()
+        num_kin = model.joints.num_kinematic_cts.numpy()
+
+        rates = []
+        for jid in range(model.size.sum_of_num_joints):
+            wid = joint_wid[jid]
+            bio = bodies_offset[wid]
+            num_bodies = num_body_dofs[wid] // 6
+            u_w = u_host[bio : bio + num_bodies].reshape(-1)
+            row_base = kin_total[jid] - world_cts_offset[wid]
+            for i in range(num_kin[jid]):
+                rates.append(J_cts[wid][row_base + i] @ u_w)
+        return np.array(rates, dtype=np.float32)
+
+    def _assert_analytic_satisfies_residual_chain_rule(self, model, data, limits, contacts, sparse: bool):
+        """Verify ``J_cts @ u`` matches the time derivative of joint constraint residuals."""
+        self._set_nonzero_body_twists(model, data)
+        jacobian = self._build_joint_jacobians(model, data, limits, contacts, sparse, ConstraintJacobianMethod.ANALYTIC)
+        dr_numeric = self._finite_difference_joint_constraint_rates(model, data)
+        dr_analytic = self._kinematic_constraint_rates_from_jacobian(model, data, jacobian)
+        np.testing.assert_allclose(dr_analytic, dr_numeric, rtol=5e-2, atol=5e-2)
+
+    def test_analytic_residual_chain_rule_dense_fourbar(self):
+        """Verify analytic dense ``J_cts`` matches ``dr_j/dt`` from pose perturbation on fourbar."""
+        model, data, _state, limits, contacts = make_test_problem_fourbar(
+            device=self.default_device,
+            num_worlds=1,
+            with_limits=False,
+            with_contacts=False,
+        )
+        self._assert_analytic_satisfies_residual_chain_rule(model, data, limits, contacts, sparse=False)
+
+    def test_analytic_residual_chain_rule_sparse_fourbar(self):
+        """Verify analytic sparse ``J_cts`` matches ``dr_j/dt`` from pose perturbation on fourbar."""
+        model, data, _state, limits, contacts = make_test_problem_fourbar(
+            device=self.default_device,
+            num_worlds=1,
+            with_limits=False,
+            with_contacts=False,
+        )
+        self._assert_analytic_satisfies_residual_chain_rule(model, data, limits, contacts, sparse=True)
+
+    def test_analytic_residual_chain_rule_dense_heterogeneous(self):
+        """Verify analytic dense ``J_cts`` matches ``dr_j/dt`` on a heterogeneous model."""
+        model, data, _state, limits, contacts = make_test_problem_heterogeneous(
+            device=self.default_device,
+            with_limits=False,
+            with_contacts=False,
+            with_implicit_joints=True,
+        )
+        self._assert_analytic_satisfies_residual_chain_rule(model, data, limits, contacts, sparse=False)
+
+    def test_analytic_residual_chain_rule_binary_universal(self):
+        """Verify analytic ``J_cts`` on a binary universal joint with FK-style angular rows."""
+        builder = build_binary_universal_joint_test(limits=False, ground=False)
+        model, data, _state, limits, contacts = make_test_problem(
+            builder=builder,
+            device=self.default_device,
+            with_limits=False,
+            with_contacts=False,
+        )
+        self._assert_analytic_satisfies_residual_chain_rule_for_dof_types(
+            model,
+            data,
+            limits,
+            contacts,
+            sparse=False,
+            dof_types={int(JointDoFType.UNIVERSAL)},
+            use_tilt=True,
+        )
+
+    def test_analytic_residual_chain_rule_passive_universal(self):
+        """Verify analytic ``J_cts`` on a passive universal joint with FK orthogonality rows."""
+        builder = build_binary_universal_joint_test(
+            limits=False, ground=False, act_type=JointActuationType.PASSIVE
+        )
+        model, data, _state, limits, contacts = make_test_problem(
+            builder=builder,
+            device=self.default_device,
+            with_limits=False,
+            with_contacts=False,
+        )
+        self._assert_analytic_satisfies_residual_chain_rule_for_dof_types(
+            model,
+            data,
+            limits,
+            contacts,
+            sparse=False,
+            dof_types={int(JointDoFType.UNIVERSAL)},
+            use_tilt=True,
+        )
+
+    def test_analytic_residual_chain_rule_fixed_joint(self):
+        """Verify analytic ``J_cts`` on fixed-joint ``quat_log`` rows with FK frame transform."""
+        builder = build_binary_revolute_joint_test(limits=False, ground=False, implicit_pd=False)
+        model, data, _state, limits, contacts = make_test_problem(
+            builder=builder,
+            device=self.default_device,
+            with_limits=False,
+            with_contacts=False,
+        )
+        self._assert_analytic_satisfies_residual_chain_rule_for_dof_types(
+            model,
+            data,
+            limits,
+            contacts,
+            sparse=False,
+            dof_types={int(JointDoFType.FIXED)},
+            use_tilt=True,
+        )
+
+    def test_analytic_differs_from_geometric_on_rotational_rows(self):
+        """Verify residual-based rotation rows differ from the screw assembly at finite pose."""
+        model, data, _state, limits, contacts = make_test_problem_fourbar(
+            device=self.default_device,
+            num_worlds=1,
+            with_limits=False,
+            with_contacts=False,
+        )
+        jacobian_geo = self._build_joint_jacobians(
+            model, data, limits, contacts, sparse=False, method=ConstraintJacobianMethod.GEOMETRIC
+        )
+        jacobian_ana = self._build_joint_jacobians(
+            model, data, limits, contacts, sparse=False, method=ConstraintJacobianMethod.ANALYTIC
+        )
+        J_cts_geo = extract_cts_jacobians(model, None, None, jacobian_geo)[0]
+        J_cts_ana = extract_cts_jacobians(model, None, None, jacobian_ana)[0]
+        self.assertFalse(np.allclose(J_cts_geo, J_cts_ana, rtol=1e-5, atol=1e-5))
+
+    def _assert_analytic_actuation_matches_geometric(self, model, data, limits, contacts, sparse: bool):
+        """Verify analytic ``J_dofs`` matches geometric screw assembly."""
+        jacobian_geo = self._build_joint_jacobians(
+            model, data, limits, contacts, sparse, ConstraintJacobianMethod.GEOMETRIC
+        )
+        jacobian_ana = self._build_joint_jacobians(
+            model, data, limits, contacts, sparse, ConstraintJacobianMethod.ANALYTIC
+        )
+        J_dofs_geo = extract_dofs_jacobians(model, jacobians=jacobian_geo)
+        J_dofs_ana = extract_dofs_jacobians(model, jacobians=jacobian_ana)
+        for wid in range(model.info.num_worlds):
+            np.testing.assert_allclose(J_dofs_ana[wid], J_dofs_geo[wid], rtol=1e-5, atol=1e-5)
+
+    def test_analytic_actuation_matches_geometric_dense_fourbar(self):
+        """Verify analytic dense ``J_dofs`` matches geometric screw assembly on fourbar."""
+        model, data, _state, limits, contacts = make_test_problem_fourbar(
+            device=self.default_device,
+            num_worlds=1,
+            with_limits=False,
+            with_contacts=False,
+        )
+        self._assert_analytic_actuation_matches_geometric(model, data, limits, contacts, sparse=False)
+
+    def test_analytic_actuation_matches_geometric_sparse_fourbar(self):
+        """Verify analytic sparse ``J_dofs`` matches geometric screw assembly on fourbar."""
+        model, data, _state, limits, contacts = make_test_problem_fourbar(
+            device=self.default_device,
+            num_worlds=1,
+            with_limits=False,
+            with_contacts=False,
+        )
+        self._assert_analytic_actuation_matches_geometric(model, data, limits, contacts, sparse=True)
+
+    def test_analytic_actuation_matches_geometric_dense_heterogeneous(self):
+        """Verify analytic dense ``J_dofs`` matches geometric screw assembly on heterogeneous model."""
+        model, data, _state, limits, contacts = make_test_problem_heterogeneous(
+            device=self.default_device,
+            with_limits=False,
+            with_contacts=False,
+            with_implicit_joints=True,
+        )
+        self._assert_analytic_actuation_matches_geometric(model, data, limits, contacts, sparse=False)
 
 
 ###

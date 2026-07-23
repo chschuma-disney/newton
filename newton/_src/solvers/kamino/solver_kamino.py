@@ -189,6 +189,13 @@ class SolverKamino(SolverBase, CouplingInterface):
         Flag to indicate whether the solver should use sparse data representations for the dynamics.
         """
 
+        constraint_jacobian_method: Literal["geometric", "analytic"] = "geometric"
+        """
+        Method used to assemble joint constraint and actuation Jacobians.\n
+        Select from ``{"geometric", "analytic"}``.\n
+        Defaults to ``"geometric"``.
+        """
+
         use_collision_detector: bool = False
         """
         Flag to indicate whether the Kamino-provided collision detector should be used.
@@ -409,6 +416,7 @@ class SolverKamino(SolverBase, CouplingInterface):
             """
             # Import here to avoid module-level imports and circular dependencies
             from ._src.core.joints import JointCorrectionMode  # noqa: PLC0415
+            from .constraint_jacobian_method import ConstraintJacobianMethod  # noqa: PLC0415
 
             # Ensure that the sparsity settings are compatible with each other
             if self.sparse_dynamics and not self.sparse_jacobian:
@@ -463,6 +471,9 @@ class SolverKamino(SolverBase, CouplingInterface):
             supported_integrators = {"euler", "moreau"}
             if self.integrator not in supported_integrators:
                 raise ValueError(f"Invalid integrator: {self.integrator}. Must be one of {supported_integrators}.")
+
+            # Conversion to ConstraintJacobianMethod will raise an error if the input string is invalid.
+            ConstraintJacobianMethod.from_string(self.constraint_jacobian_method)
 
             # Ensure the angular velocity damping factor is non-negative
             if self.angular_velocity_damping < 0.0 or self.angular_velocity_damping > 1.0:

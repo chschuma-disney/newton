@@ -24,6 +24,7 @@ from newton._src.solvers.kamino._src.kinematics.constraints import (
     update_constraints_info,
 )
 from newton._src.solvers.kamino._src.kinematics.jacobians import (
+    ConstraintJacobianMethod,
     DenseSystemJacobians,
     SparseSystemJacobians,
     SystemJacobiansType,
@@ -125,6 +126,7 @@ def make_containers(
     max_world_contacts: int = 0,
     sparse: bool = True,
     dt: float = 0.001,
+    constraint_jacobian_method: ConstraintJacobianMethod = ConstraintJacobianMethod.GEOMETRIC,
 ) -> tuple[ModelKamino, DataKamino, StateKamino, LimitsKamino, CollisionDetector, SystemJacobiansType]:
     # Create the model from the builder
     model = builder.finalize(device=device)
@@ -149,9 +151,19 @@ def make_containers(
 
     # Create the Jacobians container
     if sparse:
-        jacobians = SparseSystemJacobians(model=model, limits=limits, contacts=detector.contacts)
+        jacobians = SparseSystemJacobians(
+            model=model,
+            limits=limits,
+            contacts=detector.contacts,
+            constraint_jacobian_method=constraint_jacobian_method,
+        )
     else:
-        jacobians = DenseSystemJacobians(model=model, limits=limits, contacts=detector.contacts)
+        jacobians = DenseSystemJacobians(
+            model=model,
+            limits=limits,
+            contacts=detector.contacts,
+            constraint_jacobian_method=constraint_jacobian_method,
+        )
 
     # Return the model, data, detector, and jacobians
     return model, data, state, limits, detector, jacobians
