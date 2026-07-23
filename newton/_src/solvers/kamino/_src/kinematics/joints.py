@@ -1148,6 +1148,9 @@ def make_compute_joints_data_kernel(correction: JointCorrectionMode = JointCorre
             data_joint_dq_j,
         )
 
+        act_type = JointActuationType.aggregate_wp(
+            dofs_offset, model_joint_dofs_offset[jid + 1], model_joint_dof_act_types
+        )
         if dof_type == JointDoFType.UNIVERSAL and act_type == JointActuationType.PASSIVE:
             q_B_j = wp.quatf(0.0, 0.0, 0.0, 1.0)
             if bid_B > -1:

@@ -17,7 +17,7 @@ import warp as wp
 from ....core.types import override
 from ....sim import Contacts, ModelFlags, State
 from ...solver import SolverBase
-from ..constraint_jacobian_method import ConstraintJacobianMethod
+from ..constraint_jacobian_method import ConstraintJacobianMethod  # noqa: F401
 
 # Kamino imports
 from ..solver_kamino import SolverKamino
@@ -226,7 +226,7 @@ class SolverKaminoImpl(SolverBase):
         # Construct the unilateral constraints members in the model info
         make_unilateral_constraints_info(model=self._model, data=self._data, limits=self._limits, contacts=contacts)
 
-        constraint_jacobian_method = ConstraintJacobianMethod.from_string(self._config.constraint_jacobian_method)
+        # constraint_jacobian_method = ConstraintJacobianMethod.from_string(self._config.constraint_jacobian_method)
 
         # Allocate Jacobians data on the device
         if self._config.sparse_jacobian:
@@ -234,14 +234,14 @@ class SolverKaminoImpl(SolverBase):
                 model=self._model,
                 limits=self._limits,
                 contacts=contacts,
-                constraint_jacobian_method=constraint_jacobian_method,
+                # constraint_jacobian_method=constraint_jacobian_method,
             )
         else:
             self._jacobians = DenseSystemJacobians(
                 model=self._model,
                 limits=self._limits,
                 contacts=contacts,
-                constraint_jacobian_method=constraint_jacobian_method,
+                # constraint_jacobian_method=constraint_jacobian_method,
             )
 
         # Allocate the dual problem data on the device

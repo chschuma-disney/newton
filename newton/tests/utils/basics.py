@@ -1674,6 +1674,15 @@ def build_boxes_fourbar(
             child_xform=wp.transformf(r_j3 - r_b4, wp.quat_identity(dtype=wp.float32)),
         )
 
+        # Add a spherical joint between link 3 and link 4
+        j3 = _builder.add_joint_ball(
+            label="link3_to_link4",
+            parent=bid3,
+            child=bid4,
+            parent_xform=wp.transformf(r_j3 - r_b3, wp.quat_identity(dtype=wp.float32)),
+            child_xform=wp.transformf(r_j3 - r_b4, wp.quat_identity(dtype=wp.float32)),
+        )
+
     # Add a revolute joint between link 4 and link 1 (closes the loop)
     _builder.add_joint_revolute(
         label="link4_to_link1",
